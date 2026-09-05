@@ -1,15 +1,17 @@
-# QR Code CSV Generator
+# DSOLNEX QR Code Generator
 
-A Streamlit web app that converts CSV values to individual high-resolution QR PNG files and delivers them in one ZIP file.
+A password-protected Streamlit web app that converts CSV values into print-ready QR PDF files.
 
 ## Features
 
 - Unicode/Bangla text support
 - Proper quoted CSV and multiline-cell support
 - Select the column that contains the QR value
-- Use a serial-number column for PNG file names
-- High-resolution print PNGs (512–2048 px)
-- High QR error correction and configurable quiet zone
+- Use a serial-number column for reference
+- QR size, gaps, and margins in mm, cm, or inches
+- A3, A4, A5, A6, Letter, Legal, Tabloid, and custom sheet sizes
+- Multi-page PDF and continuous roll PDF layouts
+- High QR error correction
 
 ## Run locally
 
