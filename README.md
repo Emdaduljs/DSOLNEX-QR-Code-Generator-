@@ -1,0 +1,1 @@
+# DSOLNEX-QR-Code-Generator-
