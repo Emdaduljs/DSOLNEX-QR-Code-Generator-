@@ -9,6 +9,7 @@ A password-protected Streamlit web app that converts CSV values into print-ready
 - Select the column that contains the QR value
 - Use a serial-number column for reference
 - QR size, gaps, and margins in mm, cm, or inches
+- Choose the exact number of columns; a separate middle gap appears for two or more columns
 - A3, A4, A5, A6, Letter, Legal, Tabloid, and custom sheet sizes
 - Multi-page PDF and continuous roll PDF layouts
 - High QR error correction
