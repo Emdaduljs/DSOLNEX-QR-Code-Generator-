@@ -4,6 +4,8 @@ import csv
 import io
 import json
 import math
+import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -66,6 +68,12 @@ def save_presets(presets: dict) -> None:
 
 def current_layout_settings() -> dict:
     return {key: st.session_state.get(key, value) for key, value in LAYOUT_DEFAULTS.items()}
+
+
+def safe_pdf_name(filename: str, index: int) -> str:
+    stem = Path(filename).stem
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._")
+    return f"{index:02d}_{stem or f'csv_{index:02d}'}.pdf"
 
 
 def decode_csv(raw: bytes) -> str:
@@ -141,13 +149,16 @@ st.caption("CSV to print-ready PDF - standard sheets, custom page sizes, and con
 with st.expander("CSV format example"):
     st.code('serial,qr_text\nF00001,"বাংলাদেশ কৃষি উন্নয়ন কর্পোরেশন\nক্রমিক নং: F00001"', language="csv")
 
-uploaded_file = st.file_uploader("Upload CSV", type=["csv"])
-if not uploaded_file:
-    st.info("Upload a CSV to begin. One selected cell creates one QR code.")
+uploaded_files = st.file_uploader("Upload CSV file(s)", type=["csv"], accept_multiple_files=True, help="Upload up to 50 CSV files. Each CSV can contain up to 1,000 QR data rows.")
+if not uploaded_files:
+    st.info("Upload one or more CSV files to begin. One selected cell creates one QR code.")
+    st.stop()
+if len(uploaded_files) > 50:
+    st.error("Please upload a maximum of 50 CSV files at one time.")
     st.stop()
 
 try:
-    csv_text = decode_csv(uploaded_file.getvalue())
+    csv_texts = [(uploaded.name, decode_csv(uploaded.getvalue())) for uploaded in uploaded_files]
 except ValueError as error:
     st.error(str(error)); st.stop()
 
@@ -158,33 +169,37 @@ with first:
     has_header = st.checkbox("First row contains column names", value=True)
 
 try:
-    rows = list(csv.reader(io.StringIO(csv_text, newline=""), delimiter=delimiter))
+    parsed_csv_files = [(name, list(csv.reader(io.StringIO(csv_text, newline=""), delimiter=delimiter))) for name, csv_text in csv_texts]
 except csv.Error as error:
     st.error(f"CSV could not be read: {error}"); st.stop()
-if not rows:
-    st.warning("This CSV is empty."); st.stop()
-max_columns = max(len(row) for row in rows)
-headers = [(rows[0][i] or f"Column {i + 1}") for i in range(max_columns)] if has_header else [f"Column {i + 1}" for i in range(max_columns)]
-data_rows = rows[1:] if has_header else rows
-if not data_rows:
-    st.warning("No data rows found."); st.stop()
+empty_files = [name for name, rows in parsed_csv_files if not rows]
+if empty_files:
+    st.error(f"Empty CSV file: {', '.join(empty_files[:3])}"); st.stop()
+first_rows = parsed_csv_files[0][1]
+max_columns = max(len(row) for row in first_rows)
+headers = [(first_rows[0][i] or f"Column {i + 1}") for i in range(max_columns)] if has_header else [f"Column {i + 1}" for i in range(max_columns)]
 
 first, second = st.columns(2)
 with first: data_column = st.selectbox("Column containing QR text", headers)
 with second: label_column = st.selectbox("Reference / serial column", ["Row number"] + headers)
 data_index = headers.index(data_column)
 label_index = headers.index(label_column) if label_column != "Row number" else None
-items = []
-for row_number, row in enumerate(data_rows, start=2 if has_header else 1):
-    value = row[data_index] if data_index < len(row) else ""
-    if value.strip():
-        label = row[label_index] if label_index is not None and label_index < len(row) else f"Row {row_number}"
-        items.append(QRItem(label, value.replace("\r\n", "\n").replace("\r", "\n")))
-if not items:
-    st.warning("The selected QR-text column has no values."); st.stop()
-if len(items) > 1000:
-    st.error("Please generate a maximum of 1,000 QR codes per PDF."); st.stop()
-st.success(f"{len(items)} QR codes found in your CSV.")
+csv_batches = []
+for csv_name, rows in parsed_csv_files:
+    data_rows = rows[1:] if has_header else rows
+    items = []
+    for row_number, row in enumerate(data_rows, start=2 if has_header else 1):
+        value = row[data_index] if data_index < len(row) else ""
+        if value.strip():
+            label = row[label_index] if label_index is not None and label_index < len(row) else f"Row {row_number}"
+            items.append(QRItem(label, value.replace("\r\n", "\n").replace("\r", "\n")))
+    if not items:
+        st.error(f"No QR data found in: {csv_name}"); st.stop()
+    if len(items) > 1000:
+        st.error(f"{csv_name} contains {len(items):,} QR data. Each CSV must contain a maximum of 1,000."); st.stop()
+    csv_batches.append((csv_name, items))
+total_qr = sum(len(items) for _, items in csv_batches)
+st.success(f"{len(csv_batches)} CSV file(s) ready: {total_qr:,} QR codes total. Each CSV will generate a separate PDF.")
 
 st.subheader("QR and layout settings")
 presets = load_presets()
@@ -274,29 +289,38 @@ required_w = margins_mm[0] + margins_mm[1] + columns * qr_w_mm + max(0, columns 
 if required_w > page_size_mm[0]:
     st.error("Selected columns, QR width, left/right gaps, and middle gap do not fit the paper / roll width."); st.stop()
 if layout_type == "Continuous roll PDF":
-    rows_per_page, pages = math.ceil(len(items) / columns), 1
+    rows_per_page = math.ceil(max(len(batch_items) for _, batch_items in csv_batches) / columns)
+    page_counts = [1 for _ in csv_batches]
 else:
     available_h = page_size_mm[1] - margins_mm[2] - margins_mm[3]
     if available_h < qr_h_mm:
         st.error("QR height plus margins does not fit the selected paper."); st.stop()
     rows_per_page = max(1, math.floor((available_h + row_gap_mm) / (qr_h_mm + row_gap_mm)))
-    pages = math.ceil(len(items) / (columns * rows_per_page))
-st.info(f"Layout: {columns} columns × {rows_per_page} rows{' on the roll' if layout_type == 'Continuous roll PDF' else ' per page'} - {pages} PDF page{'s' if pages != 1 else ''}.")
+    page_counts = [math.ceil(len(batch_items) / (columns * rows_per_page)) for _, batch_items in csv_batches]
+total_pages = sum(page_counts)
+st.info(f"Layout: {columns} columns × {rows_per_page} rows{' on each roll' if layout_type == 'Continuous roll PDF' else ' per page'} - {len(csv_batches)} PDF files, {total_pages:,} PDF pages total.")
 
 first, second = st.columns([1, 2])
-with first: st.image(make_qr_image(items[0].value, ERROR_LEVELS[error_label]), caption=f"Preview: {items[0].label}", width=250)
+preview_item = csv_batches[0][1][0]
+with first: st.image(make_qr_image(preview_item.value, ERROR_LEVELS[error_label]), caption=f"Preview: {preview_item.label}", width=250)
 with second:
     st.subheader("First QR data")
-    st.code(items[0].value, language=None)
+    st.code(preview_item.value, language=None)
     st.caption("Spaces and blank lines from the CSV cell are preserved.")
-if st.button("Generate print-ready PDF", type="primary"):
+if st.button("Generate PDF ZIP", type="primary"):
     try:
-        with st.spinner("Generating QR PDF…"):
-            pdf_bytes, _, _, pages = build_pdf(items, qr_w_mm, qr_h_mm, middle_gap_mm, row_gap_mm, margins_mm, page_size_mm, ERROR_LEVELS[error_label], layout_type == "Continuous roll PDF", columns)
-        st.session_state["qr_pdf"] = pdf_bytes
-        st.session_state["qr_pdf_name"] = "dsolnex_qr_roll.pdf" if layout_type == "Continuous roll PDF" else "dsolnex_qr_codes.pdf"
-        st.success(f"PDF ready: {pages} page{'s' if pages != 1 else ''}.")
+        progress = st.progress(0, text="Preparing PDF batch…")
+        pdf_zip = io.BytesIO()
+        with zipfile.ZipFile(pdf_zip, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for index, (csv_name, batch_items) in enumerate(csv_batches, start=1):
+                progress.progress((index - 1) / len(csv_batches), text=f"Generating PDF {index} of {len(csv_batches)}: {csv_name}")
+                pdf_bytes, _, _, _ = build_pdf(batch_items, qr_w_mm, qr_h_mm, middle_gap_mm, row_gap_mm, margins_mm, page_size_mm, ERROR_LEVELS[error_label], layout_type == "Continuous roll PDF", columns)
+                archive.writestr(safe_pdf_name(csv_name, index), pdf_bytes)
+        progress.progress(1.0, text="PDF ZIP ready.")
+        st.session_state["qr_pdf_zip"] = pdf_zip.getvalue()
+        st.session_state["qr_pdf_zip_name"] = "dsolnex_qr_pdf_batch.zip"
+        st.success(f"{len(csv_batches)} PDF files are ready in one ZIP.")
     except ValueError as error:
         st.error(str(error))
-if "qr_pdf" in st.session_state:
-    st.download_button("Download QR PDF", st.session_state["qr_pdf"], st.session_state["qr_pdf_name"], "application/pdf", type="primary")
+if "qr_pdf_zip" in st.session_state:
+    st.download_button("Download PDF ZIP", st.session_state["qr_pdf_zip"], st.session_state["qr_pdf_zip_name"], "application/zip", type="primary")
