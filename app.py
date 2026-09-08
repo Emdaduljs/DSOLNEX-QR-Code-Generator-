@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,15 @@ PAPER_SIZES_MM = {
 }
 MM_PER_UNIT = {"mm": 1.0, "cm": 10.0, "inch": 25.4}
 PT_PER_MM = 72 / 25.4
+PRESET_FILE = Path("/tmp/dsolnex_qr_layout_presets.json")
+LAYOUT_DEFAULTS = {
+    "layout_type": "Sheet PDF (A4 / A3 / custom)", "layout_unit": "mm", "layout_columns": 1,
+    "layout_qr_w": 35.0, "layout_qr_h": 35.0, "layout_row_gap": 5.0, "layout_middle_gap": 5.0,
+    "layout_left_gap": 10.0, "layout_right_gap": 10.0, "layout_top_gap": 10.0, "layout_bottom_gap": 10.0,
+    "layout_paper": "A4 (210 x 297 mm)", "layout_orientation": "Portrait",
+    "layout_custom_w": 210.0, "layout_custom_h": 297.0, "layout_roll_w": 100.0,
+    "layout_error": "High (30%) - recommended",
+}
 
 
 @dataclass
@@ -40,6 +50,22 @@ class QRItem:
 
 def to_mm(value: float, unit: str) -> float:
     return value * MM_PER_UNIT[unit]
+
+
+def load_presets() -> dict:
+    try:
+        saved = json.loads(PRESET_FILE.read_text(encoding="utf-8"))
+        return saved if isinstance(saved, dict) else {}
+    except (OSError, ValueError, json.JSONDecodeError):
+        return {}
+
+
+def save_presets(presets: dict) -> None:
+    PRESET_FILE.write_text(json.dumps(presets, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def current_layout_settings() -> dict:
+    return {key: st.session_state.get(key, value) for key, value in LAYOUT_DEFAULTS.items()}
 
 
 def decode_csv(raw: bytes) -> str:
@@ -130,8 +156,6 @@ with first:
     delimiter_name = st.selectbox("CSV separator", ["Comma (,)", "Semicolon (;)", "Tab"])
     delimiter = {"Comma (,)": ",", "Semicolon (;)": ";", "Tab": "\t"}[delimiter_name]
     has_header = st.checkbox("First row contains column names", value=True)
-with second:
-    layout_type = st.radio("Print format", ["Sheet PDF (A4 / A3 / custom)", "Continuous roll PDF"], horizontal=True)
 
 try:
     rows = list(csv.reader(io.StringIO(csv_text, newline=""), delimiter=delimiter))
@@ -163,44 +187,87 @@ if len(items) > 1000:
 st.success(f"{len(items)} QR codes found in your CSV.")
 
 st.subheader("QR and layout settings")
-unit = st.selectbox("Measurement unit", ["mm", "cm", "inch"])
+presets = load_presets()
+with st.expander("Save and load layout settings", expanded=True):
+    st.caption("Saved settings remain available while this app environment is running. Download the JSON file to keep a permanent backup and import it anytime.")
+    preset_names = list(presets)
+    save_col, load_col, action_col = st.columns([2, 2, 2])
+    with save_col:
+        new_preset_name = st.text_input("New setting name", placeholder="Example: RT 72.10 x 35 mm - 2 columns", key="new_preset_name")
+        if st.button("Save current setting", key="save_preset"):
+            if not new_preset_name.strip():
+                st.warning("Write a setting name before saving.")
+            else:
+                presets[new_preset_name.strip()] = current_layout_settings()
+                save_presets(presets)
+                st.success(f"Saved: {new_preset_name.strip()}")
+    with load_col:
+        selected_preset = st.selectbox("Saved setting", ["Select a saved setting"] + preset_names, key="selected_preset")
+        if st.button("Load selected setting", key="load_preset", disabled=selected_preset == "Select a saved setting"):
+            for key, value in presets[selected_preset].items():
+                if key in LAYOUT_DEFAULTS:
+                    st.session_state[key] = value
+            st.rerun()
+    with action_col:
+        if st.button("Delete selected setting", key="delete_preset", disabled=selected_preset == "Select a saved setting"):
+            presets.pop(selected_preset, None)
+            save_presets(presets)
+            st.rerun()
+        preset_json = json.dumps(presets, ensure_ascii=False, indent=2)
+        st.download_button("Download all saved settings", preset_json, "dsolnex_qr_layout_settings.json", "application/json")
+        imported_presets = st.file_uploader("Import saved settings JSON", type=["json"], key="import_presets")
+        if imported_presets and st.button("Import settings", key="import_preset_button"):
+            try:
+                imported = json.loads(imported_presets.getvalue().decode("utf-8"))
+                if not isinstance(imported, dict):
+                    raise ValueError
+                for name, setting in imported.items():
+                    if isinstance(name, str) and isinstance(setting, dict):
+                        presets[name] = {key: setting.get(key, default) for key, default in LAYOUT_DEFAULTS.items()}
+                save_presets(presets)
+                st.rerun()
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                st.error("This is not a valid DSOLNEX QR settings JSON file.")
+
+layout_type = st.radio("Print format", ["Sheet PDF (A4 / A3 / custom)", "Continuous roll PDF"], horizontal=True, key="layout_type")
+unit = st.selectbox("Measurement unit", ["mm", "cm", "inch"], key="layout_unit")
 default_size, default_gap, default_margin = (35.0, 5.0, 10.0) if unit == "mm" else (3.5, 0.5, 1.0)
-columns_selected = st.number_input("Number of columns", min_value=1, max_value=20, value=1, step=1)
+columns_selected = st.number_input("Number of columns", min_value=1, max_value=20, value=1, step=1, key="layout_columns")
 cols = st.columns(3)
-with cols[0]: qr_w_value = st.number_input(f"QR width ({unit})", 0.1, value=default_size, step=0.1)
-with cols[1]: qr_h_value = st.number_input(f"QR height ({unit})", 0.1, value=default_size, step=0.1)
-with cols[2]: row_gap_value = st.number_input(f"Row gap - top / bottom ({unit})", 0.0, value=default_gap, step=0.1)
+with cols[0]: qr_w_value = st.number_input(f"QR width ({unit})", 0.1, value=default_size, step=0.1, key="layout_qr_w")
+with cols[1]: qr_h_value = st.number_input(f"QR height ({unit})", 0.1, value=default_size, step=0.1, key="layout_qr_h")
+with cols[2]: row_gap_value = st.number_input(f"Row gap - top / bottom ({unit})", 0.0, value=default_gap, step=0.1, key="layout_row_gap")
 if columns_selected >= 2:
-    middle_gap_value = st.number_input(f"Middle gap between columns ({unit})", 0.0, value=default_gap, step=0.1)
+    middle_gap_value = st.number_input(f"Middle gap between columns ({unit})", 0.0, value=default_gap, step=0.1, key="layout_middle_gap")
 else:
     middle_gap_value = 0.0
     st.caption("One column selected: no middle gap is required.")
 cols = st.columns(4)
-with cols[0]: margin_left = st.number_input(f"Left gap ({unit})", 0.0, value=default_margin, step=0.1)
-with cols[1]: margin_right = st.number_input(f"Right gap ({unit})", 0.0, value=default_margin, step=0.1)
-with cols[2]: margin_top = st.number_input(f"Top gap ({unit})", 0.0, value=default_margin, step=0.1)
-with cols[3]: margin_bottom = st.number_input(f"Bottom gap ({unit})", 0.0, value=default_margin, step=0.1)
+with cols[0]: margin_left = st.number_input(f"Left gap ({unit})", 0.0, value=default_margin, step=0.1, key="layout_left_gap")
+with cols[1]: margin_right = st.number_input(f"Right gap ({unit})", 0.0, value=default_margin, step=0.1, key="layout_right_gap")
+with cols[2]: margin_top = st.number_input(f"Top gap ({unit})", 0.0, value=default_margin, step=0.1, key="layout_top_gap")
+with cols[3]: margin_bottom = st.number_input(f"Bottom gap ({unit})", 0.0, value=default_margin, step=0.1, key="layout_bottom_gap")
 qr_w_mm, qr_h_mm = to_mm(qr_w_value, unit), to_mm(qr_h_value, unit)
 middle_gap_mm, row_gap_mm = to_mm(middle_gap_value, unit), to_mm(row_gap_value, unit)
 margins_mm = tuple(to_mm(value, unit) for value in (margin_left, margin_right, margin_top, margin_bottom))
 if not math.isclose(qr_w_mm, qr_h_mm, rel_tol=0, abs_tol=0.01):
     st.error("QR width and height must be equal. A non-square QR may not scan correctly."); st.stop()
 
-paper_choice = st.selectbox("Paper size", list(PAPER_SIZES_MM) + ["Custom size"])
-orientation = st.radio("Orientation", ["Portrait", "Landscape"], horizontal=True, disabled=layout_type == "Continuous roll PDF")
+paper_choice = st.selectbox("Paper size", list(PAPER_SIZES_MM) + ["Custom size"], key="layout_paper")
+orientation = st.radio("Orientation", ["Portrait", "Landscape"], horizontal=True, disabled=layout_type == "Continuous roll PDF", key="layout_orientation")
 if paper_choice == "Custom size":
     first, second = st.columns(2)
-    with first: custom_w = st.number_input(f"Custom page width ({unit})", 1.0, value=210.0 if unit == "mm" else 21.0, step=1.0)
-    with second: custom_h = st.number_input(f"Custom page height ({unit})", 1.0, value=297.0 if unit == "mm" else 29.7, step=1.0)
+    with first: custom_w = st.number_input(f"Custom page width ({unit})", 1.0, value=210.0 if unit == "mm" else 21.0, step=1.0, key="layout_custom_w")
+    with second: custom_h = st.number_input(f"Custom page height ({unit})", 1.0, value=297.0 if unit == "mm" else 29.7, step=1.0, key="layout_custom_h")
     page_size_mm = (to_mm(custom_w, unit), to_mm(custom_h, unit))
 else:
     page_size_mm = PAPER_SIZES_MM[paper_choice]
 if orientation == "Landscape": page_size_mm = (page_size_mm[1], page_size_mm[0])
 if layout_type == "Continuous roll PDF":
-    roll_width = st.number_input(f"Roll width ({unit})", 1.0, value=100.0 if unit == "mm" else 10.0, step=1.0)
+    roll_width = st.number_input(f"Roll width ({unit})", 1.0, value=100.0 if unit == "mm" else 10.0, step=1.0, key="layout_roll_w")
     page_size_mm = (to_mm(roll_width, unit), 1.0)
     st.info("One PDF page is created at the selected roll width. Its height is calculated for all QR codes. Print at Actual Size / 100%.")
-error_label = st.selectbox("QR error correction", list(ERROR_LEVELS), index=3)
+error_label = st.selectbox("QR error correction", list(ERROR_LEVELS), index=3, key="layout_error")
 
 columns = int(columns_selected)
 required_w = margins_mm[0] + margins_mm[1] + columns * qr_w_mm + max(0, columns - 1) * middle_gap_mm
